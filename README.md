@@ -1,89 +1,190 @@
-# TP Iris — Random Forest et XGBoost
+# TP 4 — L'API Iris et une base de données Redis
 
-Projet adapté à l'exercice page 23 du cours Docker. Deux classifieurs sont entraînés sur Iris, puis chargés par une API FastAPI. Commandes prévues pour **PowerShell sous Windows + Docker Desktop**. Aucun Python local n'est requis.
+**Module :** Cloud Computing & Déploiement IA  
+**Filière :** Génie Informatique — Data & AI  
+**Université :** Mundiapolis  
+**Réalisé par :** MOTTAKI Hafsa  
+**Encadré par :** Pr. Mohammed AMEKSA  
+**Année universitaire :** 2026–2027
 
-## 1. Lancer le projet
+📄 **[Consulter le compte rendu complet (PDF)](rapport/TP4_MOTTAKI_Hafsa.pdf)**
 
-Ouvrir PowerShell dans le dossier extrait et vérifier que Docker Desktop est démarré.
+## 1. Introduction et objectifs
+
+Ce TP reprend l'API de classification Iris réalisée lors du TP précédent. Développée avec **FastAPI**, elle utilise deux modèles de machine learning : **Random Forest** et **XGBoost**.
+
+L'objectif du TP 4 est d'ajouter une mémoire à cette API grâce à **Redis**, afin de compter les prédictions effectuées. Le projet permet également d'orchestrer les services avec **Docker Compose** et de vérifier la persistance des données après l'arrêt ou la suppression des conteneurs et des volumes.
+
+## 2. Architecture retenue
+
+Le projet comporte trois services :
+
+| Service | Rôle |
+|---|---|
+| `train` | Entraîne les modèles et les sauvegarde dans le volume `iris-models`. |
+| `api` | Expose les routes de prédiction sur le port `8000` et charge les modèles enregistrés. |
+| `base` | Exécute Redis et conserve le compteur `total_predictions` dans le volume `redis-data`. |
+
+L'API communique avec Redis sur le réseau interne de Docker Compose, grâce au nom du service `base` et au port `6379`.
+
+```text
+                    Requêtes HTTP
+                          |
+                          v
+                +-------------------+
+                | API FastAPI       |
+                | localhost:8000    |
+                +-------------------+
+                    |           |
+         modèles ML|           | compteur
+                    v           v
+              [iris-models]  +------------------+
+                    ^        | Redis (base:6379)|
+                    |        +------------------+
+              [train]                |
+                                     v
+                                [redis-data]
+```
+
+## 3. Mise en place de Redis dans l'API
+
+### 3.1. Dépendance Python
+
+Ajout de la bibliothèque Redis dans `requirements.txt` :
+
+```text
+redis>=5.0,<7.0
+```
+
+### 3.2. Initialisation du client Redis
+
+Dans `src/api.py`, les paramètres de connexion sont lus depuis les variables d'environnement `REDIS_HOST` et `REDIS_PORT`. Par défaut, le client se connecte à `base:6379`.
+
+```python
+REDIS_HOST = os.getenv('REDIS_HOST', 'base')
+REDIS_PORT = int(os.getenv('REDIS_PORT', '6379'))
+
+redis_client = redis.Redis(
+    host=REDIS_HOST,
+    port=REDIS_PORT,
+    decode_responses=True
+)
+```
+
+### 3.3. Compteur de prédictions
+
+Après une prédiction réussie, l'instruction suivante incrémente le compteur :
+
+```python
+redis_client.incr('total_predictions')
+```
+
+La route `GET /stats` lit la valeur avec `redis_client.get('total_predictions')` et renvoie le nombre total de prédictions. Le code prévoit une réponse **HTTP 503** lorsque Redis est indisponible.
+
+## 4. Orchestration avec Docker Compose
+
+Le fichier `compose.yaml` définit les services `train`, `api` et `base`.
+
+- **Redis :** image `redis:7-alpine`, persistance AOF activée avec `redis-server --appendonly yes` et volume `redis-data:/data`.
+- **API :** port `8000:8000`, accès en lecture seule au volume `iris-models` et variables `REDIS_HOST=base`, `REDIS_PORT=6379`.
+- **Dépendances :** l'API attend que Redis soit en bonne santé et que l'entraînement se termine avec succès.
+
+### 4.1. Validation
 
 ```powershell
-docker info
+docker compose config
+docker compose config --services
+```
+
+Les trois services identifiés sont `train`, `base` et `api`.
+
+### 4.2. Démarrage et contrôle
+
+```powershell
 docker compose up --build -d
-docker compose ps
-docker compose logs train
+docker compose ps -a
 ```
 
-Le service `train` termine normalement avec le code 0, puis l'API démarre. Ouvrir http://localhost:8000/docs et http://localhost:8000/health.
+**Résultat observé :** `api` et `base` sont en état `healthy`. Le service `train` est en état `Exited (0)`, ce qui est normal après la fin de l'entraînement.
 
-## 2. Tester les deux modèles
+## 5. Tests fonctionnels
+
+Les caractéristiques de la fleur Iris testée sont :
+
+| Caractéristique | Valeur |
+|---|---:|
+| Longueur du sépale (`sepal_length`) | 5.1 |
+| Largeur du sépale (`sepal_width`) | 3.5 |
+| Longueur du pétale (`petal_length`) | 1.4 |
+| Largeur du pétale (`petal_width`) | 0.2 |
+
+### 5.1. Envoyer deux prédictions
+
+Dans **PowerShell** :
 
 ```powershell
-$iris = @{ sepal_length=5.1; sepal_width=3.5; petal_length=1.4; petal_width=0.2 } | ConvertTo-Json
-Invoke-RestMethod -Uri http://localhost:8000/predict/random_forest -Method Post -ContentType 'application/json' -Body $iris
-Invoke-RestMethod -Uri http://localhost:8000/predict/xgboost -Method Post -ContentType 'application/json' -Body $iris
+$body = @{
+    sepal_length = 5.1
+    sepal_width = 3.5
+    petal_length = 1.4
+    petal_width = 0.2
+} | ConvertTo-Json
+
+Invoke-RestMethod -Uri "http://localhost:8000/predict/random_forest" -Method Post -ContentType "application/json" -Body $body
+
+Invoke-RestMethod -Uri "http://localhost:8000/predict/xgboost" -Method Post -ContentType "application/json" -Body $body
+
+Invoke-RestMethod -Uri "http://localhost:8000/stats" -Method Get
 ```
 
-Consulter les scores (dans le volume partagé) :
+**Résultats observés :**
 
-```powershell
-docker compose run --rm --no-deps --entrypoint python api -c "from pathlib import Path; print(Path('/models/metrics.json').read_text())"
-```
+| Test | Résultat |
+|---|---|
+| `POST /predict/random_forest` | Classe `setosa` |
+| `POST /predict/xgboost` | Classe `setosa` |
+| `GET /stats` après les deux requêtes | `total_predictions = 2` |
 
-## 3. Version naïve et version optimisée
+Ces résultats confirment le fonctionnement des prédictions et l'enregistrement du compteur dans Redis.
 
-Les quatre Dockerfiles se trouvent à la racine. La version naïve utilise une image complète, copie le code avant les dépendances et conserve le cache pip. La version optimisée utilise `slim`, copie les dépendances avant le code, exclut les fichiers inutiles, tourne sans root, et l'API est construite en deux étapes.
+## 6. Persistance des données Redis
 
-## 4. Benchmark (mesures réelles)
-
-```powershell
-.\benchmark.ps1
-```
-
-Le script crée `results/benchmark.csv` avec la taille de chaque image, la durée d'un build sans cache et celle d'un build immédiatement répété avec cache. Le build à froid ici est **sans cache de couches** ; ce n'est pas une mesure du temps de téléchargement initial de l'image de base.
-
-Pour mesurer l'effet du réordonnancement après une modification du code, modifier un commentaire dans `src/api.py`, puis relancer :
-
-```powershell
-Measure-Command { docker build -f Dockerfile.serve.naive -t iris-serve:naive . }
-Measure-Command { docker build -f Dockerfile.serve.opt -t iris-serve:opt . }
-```
-
-Remarque : si vous faites la modification après avoir construit les images, comparez les reconstructions ; le script de benchmark ne modifie pas les sources.
-
-## 5. Trivy et corrections
-
-Installer Trivy séparément si nécessaire, puis :
-
-```powershell
-trivy image --severity HIGH,CRITICAL iris-serve:naive | Out-File results/trivy-naive.txt
-trivy image --severity HIGH,CRITICAL iris-serve:opt | Out-File results/trivy-opt.txt
-trivy image --severity HIGH,CRITICAL --ignore-unfixed iris-serve:opt
-trivy fs --scanners vuln,secret,misconfig .
-```
-
-**Important :** il est impossible d'affirmer que deux vulnérabilités critiques ont été corrigées avant d'avoir réellement scanné les images. Pour valider la consigne, identifier deux CVE CRITICAL présentes dans le rapport initial et ayant un correctif, relever les versions `INSTALLED` / `FIXED`, mettre à jour l'image de base ou les dépendances concernées, reconstruire, rescanner et conserver les rapports avant/après. Ne pas inventer des CVE.
-
-## 6. Arrêter
+### 6.1. Test avec `docker compose down`
 
 ```powershell
 docker compose down
+docker compose up -d
+Invoke-RestMethod -Uri "http://localhost:8000/stats" -Method Get
 ```
 
-Ne pas utiliser `down -v` sauf pour supprimer volontairement les modèles stockés dans le volume.
+**Résultat :** le compteur reste à **2** après redémarrage. Les conteneurs sont supprimés et recréés, mais le volume Redis est conservé.
 
-## Tableau de compte rendu
+### 6.2. Test avec `docker compose down -v`
 
-| Indicateur | Naïve | Optimisée |
-|---|---|---|
-| Taille image (Mo) | À mesurer | À mesurer |
-| Build à froid (s) | À mesurer | À mesurer |
-| Rebuild immédiat (s) | À mesurer | À mesurer |
-| Reconstruction après modification du code (s) | À mesurer | À mesurer |
-| CVE CRITICAL avant/après | À scanner | À scanner |
+> **Attention :** l'option `-v` supprime les volumes nommés du projet, y compris les données Redis et les modèles enregistrés.
 
-## Points de contrôle
+```powershell
+docker compose down -v
+docker compose up -d
+Invoke-RestMethod -Uri "http://localhost:8000/stats" -Method Get
+```
 
-- Les fichiers `random_forest.joblib`, `xgboost.joblib` et `metrics.json` sont créés dans le volume nommé `iris-models`.
-- L'API charge les deux modèles au démarrage, après réussite de l'entraînement.
-- L'API fournit les routes `/health`, `/predict/random_forest`, `/predict/xgboost` et `/docs`.
-- `docker compose ps` doit montrer `train` terminé et `api` démarré.
+**Résultat :** les volumes `redis-data` et `iris-models` sont supprimés puis recréés. Le service d'entraînement régénère les modèles. Après un premier appel temporairement interrompu pendant le démarrage, l'API répond et le compteur est remis à **0**.
+
+### 6.3. Comparaison des résultats
+
+| Opération | État du volume Redis | Compteur observé |
+|---|---|---:|
+| Après deux prédictions | Présent | 2 |
+| `down` puis `up` | Conservé | 2 |
+| `down -v` puis `up` | Supprimé puis recréé | 0 |
+
+## 7. Conclusion
+
+Ce TP a permis d'ajouter une mémoire à l'API Iris avec Redis et de faire fonctionner l'ensemble avec Docker Compose. Les prédictions Random Forest et XGBoost ont été réalisées avec succès et le compteur a enregistré les deux requêtes.
+
+Les tests de persistance ont montré que **`docker compose down` conserve les volumes**, tandis que **`docker compose down -v` les supprime**, entraînant la réinitialisation du compteur. Ces notions seront utiles lors du déploiement de l'architecture API + Redis sur **Kubernetes**.
+
+---
+
+**Rapport détaillé avec captures d'écran :** [TP4_MOTTAKI_Hafsa.pdf](rapport/TP4_MOTTAKI_Hafsa.pdf)
