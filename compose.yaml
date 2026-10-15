@@ -1,0 +1,45 @@
+
+services:
+  train:
+    build:
+      context: .
+      dockerfile: Dockerfile.train.opt
+    image: iris-train:opt
+    volumes:
+      - iris-models:/models
+    restart: "no"
+
+  base:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.serve.opt
+    image: iris-serve:opt
+    ports:
+      - "8000:8000"
+    environment:
+      REDIS_HOST: base
+      REDIS_PORT: "6379"
+    volumes:
+      - iris-models:/models:ro
+    depends_on:
+      train:
+        condition: service_completed_successfully
+      base:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  iris-models:
+  redis-data:
